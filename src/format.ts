@@ -146,8 +146,10 @@ export function formatThreads(r: ThreadsResult, o: FormatOpts): string {
   for (const t of r.threads) {
     const mark = t.current ? c.cyan(sym.diamond) : " ";
     const id = c.dim(String(t.id).padStart(width));
-    const state = r.stopped ? c.red(sym.stop) : c.dim(sym.running);
-    out.push(`${mark} ${state} ${id} ${t.name}`);
+    // Text label (not a symbol) so it survives non-TTY without colliding with
+    // the focus-line markers used in snippets.
+    const state = r.stopped ? c.red("stopped") : c.dim("running");
+    out.push(`${mark} ${id} ${state}  ${t.name}`);
   }
   return out.join("\n");
 }
@@ -196,9 +198,17 @@ function renderVarTree(v: VarView, prefix: string, isLast: boolean, depth: numbe
 
 export function formatLocals(r: LocalsResult, o: FormatOpts): string {
   if (o.json) return JSON.stringify(normalizeLocals(r));
-  if (!r.scopes.length) return c.dim("(no scopes — is a frame selected?)");
+  // Filter out noisy scopes the agent almost never wants by default:
+  //  - "Registers" (lldb-dap exposes CPU register groups as scopes — pure noise
+  //    in a `locals` dump; reachable via `expand <ref>` if truly needed)
+  //  - scopes whose variables are all `<no-type>` placeholders
+  const isNoise = (s: { name: string; variables: { type?: string }[] }) =>
+    s.name === "Registers" ||
+    (s.variables.length > 0 && s.variables.every((v) => !v.type || v.type === "<no-type>"));
+  const scopes = r.scopes.filter((s) => !isNoise(s));
+  if (!scopes.length) return c.dim("(no locals — is a frame selected? try 'dbgx where')");
   const out: string[] = [];
-  for (const scope of r.scopes) {
+  for (const scope of scopes) {
     const tag = scope.expensive ? c.yellow(c.dim(`${scope.name} (expensive)`)) : c.bold(scope.name);
     out.push(tag);
     if (!scope.variables.length) { out.push(c.dim("  (empty)")); continue; }
@@ -276,7 +286,7 @@ export function formatStatus(r: StatusResult, o: FormatOpts): string {
     `${c.bold("dbgx")} ${stateColor(stateSym + " " + r.state)}`,
     c.dim(`  adapter: ${r.adapter ?? "none"}${r.language ? ` (${r.language})` : ""}${r.mode ? `  mode: ${r.mode}` : ""}`),
   ];
-  if (r.thread != null) out.push(c.dim(`  thread: #${r.thread}` + (r.frame != null ? `  frame: #${r.frame}` : "") + (r.stopReason ? `  reason: ${r.stopReason}` : "")));
+  if (r.thread != null) out.push(c.dim(`  thread: #${r.thread}` + (r.stopReason ? `  reason: ${r.stopReason}` : "")));
   if (r.processId != null) out.push(c.dim(`  process: #${r.processId}`));
   out.push(c.dim(`  breakpoints: ${r.breakpointCount}  output: ${formatBytes(r.outputBytes)}`));
   if (r.adapter) {

@@ -509,6 +509,11 @@ export class Daemon {
   }
 
   private onOutput(body: { output: string; category?: string }): void {
+    // Drop adapter chatter: `console` is the adapter's own UI/debug messages
+    // (e.g. lldb-dap's "To get started with the debug console..." banner),
+    // `telemetry` is internal metrics. Keep stdout/stderr (the debuggee's
+    // actual process output) and `important` (user-facing adapter notices).
+    if (body.category === "console" || body.category === "telemetry") return;
     this.outputBuffer += body.output;
     if (this.outputBuffer.length > OUTPUT_CAP) {
       this.outputBuffer = this.outputBuffer.slice(-OUTPUT_CAP);
@@ -1116,12 +1121,22 @@ export class Daemon {
     const found = await this.findVariableInScopes(frameId, name);
     if (found) return this.toVarView(found.variable, depth);
     // Fall back to evaluating the name as an expression.
+    let evalErr: Error | null = null;
     try {
       const ev = await this.client!.evaluate(name, frameId, "watch");
       return { name, value: ev.result, type: ev.type, ref: ev.variablesReference, children: depth > 0 && ev.variablesReference ? await this.expandVar(ev.variablesReference, depth - 1) : undefined };
-    } catch {
-      return null;
+    } catch (e) {
+      evalErr = e instanceof Error ? e : new Error(String(e));
     }
+    // Not in the current frame's scopes and not evaluable here. Give the
+    // agent a hint: the name may live in a different frame (a common mistake
+    // when stopped in a callee and asking for a caller's local).
+    const frameName = this.lastFrames.find((f) => f.id === frameId)?.name ?? "current";
+    throw new Error(
+      `'${name}' not found in frame '${frameName}' (it's not a local here and ` +
+      `eval failed: ${evalErr.message}). Use 'dbgx where' to see frames, ` +
+      `'dbgx frame <n>' to switch to one where '${name}' is in scope.`,
+    );
   }
 
   async handleExpand(a: unknown[]): Promise<VarView[]> {
@@ -1141,7 +1156,25 @@ export class Daemon {
     // "watch" context evaluates the expression in the current frame — the
     // DAP-correct semantic for `eval`. ("repl" would let GDB interpret bare
     // names like `i` as debugger commands, e.g. the `info` abbreviation.)
-    const ev = await this.client!.evaluate(expr, frameId, "watch");
+    let ev;
+    try {
+      ev = await this.client!.evaluate(expr, frameId, "watch");
+    } catch (e) {
+      // Adapters (lldb-dap especially) often send an EMPTY error message for
+      // failed evaluations, leaving the agent with the opaque "DAP request
+      // 'evaluate' failed". Wrap it with the expression + frame so the agent
+      // has context for the common failure modes: symbol not in scope (the
+      // variable lives in a different frame), unsupported expression syntax
+      // (e.g. lldb-dap rejects function calls in eval), or a typo.
+      const frameName = this.lastFrames.find((f) => f.id === frameId)?.name ?? "current";
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `eval '${expr}' failed in frame '${frameName}': ${msg}. ` +
+        `Common causes: the symbol isn't in scope here (try 'dbgx where' + ` +
+        `'dbgx frame <n>' to switch frames), the adapter rejects this ` +
+        `expression form (e.g. lldb-dap won't evaluate function calls), or a typo.`,
+      );
+    }
     return {
       result: ev.result,
       type: ev.type,

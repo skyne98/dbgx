@@ -39,6 +39,12 @@ import {
   formatStatus,
   formatOutput,
   formatFrameSelect,
+  formatProfileStart,
+  formatProfileList,
+  formatProfileShow,
+  formatProfileReport,
+  formatProfileAnnotate,
+  formatProfileRm,
   type FormatOpts,
 } from "./format.ts";
 import { c } from "./color.ts";
@@ -73,6 +79,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (a === "--language") flags.language = argv[++i] ?? "";
     else if (a === "--workspace" || a === "-w") flags.workspace = argv[++i] ?? "";
     else if (a === "--depth") flags.depth = Number(argv[++i]) || 1;
+    else if (a === "--rate") flags.rate = Number(argv[++i]) || 0;
     else if (a === "--condition") flags.condition = argv[++i] ?? "";
     else if (a === "--hit") flags.hit = argv[++i] ?? "";
     else if (a === "--log") flags.log = argv[++i] ?? "";
@@ -178,6 +185,17 @@ export function usage(): string {
     "  setvar <name> <value>               Assign a new value to a variable (if supported).",
     "  output [--tail]                      Drained debuggee stdout/stderr.",
     "",
+    "PROFILING  (bounded-window CPU sampling via perf sidecar; Linux, native langs)",
+    "  profile start [--rate N]            Sample from the current stop to the next.",
+    "                                       Spawns perf, continues, stops at exit bookend,",
+    "                                       saves a GUID-keyed sample. Returns the GUID.",
+    "  profile list                        List all saved samples (by GUID).",
+    "  profile show <id>                   Sample metadata (window, sample count, perfdata path).",
+    "  profile report <id> [N]             Top-N hot functions by sample %.",
+    "  profile annotate <id> <symbol> [N]  Per-instruction sample % in the disassembly,",
+    "                                       mapped to source lines (\"did the compiler fuck us\").",
+    "  profile rm <id>                     Delete a sample.",
+    "",
     "DAEMON / DISCOVERY",
     "  daemon                 Run the per-workspace daemon in the foreground.",
     "  close [--all]          Stop the daemon.",
@@ -192,6 +210,7 @@ export function usage(): string {
     "  --language <id>         Force a language id.",
     "  --color/--no-color     Force ANSI colors on/off.",
     "  --no-snippet           Omit source snippets (default: include them).",
+    "  --rate N               Profiling sample frequency in Hz (profile start; default 99).",
     "",
     "EXAMPLES",
     "  dbgx doctor                       # which adapters are installed?",
@@ -311,6 +330,9 @@ export async function run(argv: string[]): Promise<number> {
     case "output":
     case "out":
       return await runSimple(flags, { m: "output", a: [Boolean(flags.tail)] }, (r) => formatOutput(r as never, fmtOpts(flags)));
+    case "profile":
+    case "prof":
+      return await runProfile(flags, positional);
     default:
       console.error(`${c.red("error")}: unknown command '${command}'\n`);
       console.error(usage());
@@ -445,6 +467,73 @@ async function runSetVar(
     { m: "setvar", a: [name, value] },
     (r) => formatSetVar(r as never, fmtOpts(flags)),
   );
+}
+
+async function runProfile(
+  flags: Flags,
+  positional: string[],
+): Promise<number> {
+  const sub = positional[0] ?? "";
+  const args = positional.slice(1);
+  switch (sub) {
+    case "start":
+    case "begin":
+    case "capture": {
+      const rate = Number(flags.rate ?? 99) || 99;
+      return await runSimple(
+        flags,
+        { m: "profile-start", a: [rate] },
+        (r) => formatProfileStart(r as never, fmtOpts(flags)),
+      );
+    }
+    case "list":
+    case "ls":
+      return await runSimple(
+        flags,
+        { m: "profile-list" },
+        (r) => formatProfileList(r as never, fmtOpts(flags)),
+      );
+    case "show":
+    case "info":
+      if (!args[0]) { console.error(`${c.red("error")}: expected <sample-id> — run 'dbgx profile list'`); return 1; }
+      return await runSimple(
+        flags,
+        { m: "profile-show", a: [args[0]] },
+        (r) => formatProfileShow(r as never, fmtOpts(flags)),
+      );
+    case "report":
+    case "hot":
+      if (!args[0]) { console.error(`${c.red("error")}: expected <sample-id> — run 'dbgx profile list'`); return 1; }
+      return await runSimple(
+        flags,
+        { m: "profile-report", a: [args[0], Number(args[1] ?? 20) || 20] },
+        (r) => formatProfileReport(r as never, fmtOpts(flags)),
+      );
+    case "annotate":
+    case "asm":
+      if (!args[0] || !args[1]) {
+        console.error(`${c.red("error")}: expected <sample-id> <symbol> — e.g. 'dbgx profile annotate <id> main'`);
+        return 1;
+      }
+      return await runSimple(
+        flags,
+        { m: "profile-annotate", a: [args[0], args[1], Number(args[2] ?? 200) || 200] },
+        (r) => formatProfileAnnotate(r as never, fmtOpts(flags)),
+      );
+    case "rm":
+    case "remove":
+    case "delete":
+      if (!args[0]) { console.error(`${c.red("error")}: expected <sample-id> — run 'dbgx profile list'`); return 1; }
+      return await runSimple(
+        flags,
+        { m: "profile-rm", a: [args[0]] },
+        (r) => formatProfileRm(r as never, fmtOpts(flags)),
+      );
+    default:
+      console.error(`${c.red("error")}: unknown profile subcommand '${sub}'`);
+      console.error(c.dim("  usage: dbgx profile <start|list|show|report|annotate|rm> [...]"));
+      return 1;
+  }
 }
 
 async function runSimple(

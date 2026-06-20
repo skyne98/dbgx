@@ -33,6 +33,7 @@ import {
 } from "../paths.ts";
 import { DapClient } from "../dap/client.ts";
 import { pickFreePort } from "../util.ts";
+import * as profile from "./profile.ts";
 import type {
   Capabilities,
   StackFrame,
@@ -195,6 +196,8 @@ export interface StatusResult {
   thread?: number;
   frame?: number;
   stopReason?: string;
+  /** The debuggee's OS PID (when the adapter reports it via `process`). */
+  processId?: number;
   breakpointCount: number;
   outputBytes: number;
   caps: Record<string, boolean>;
@@ -232,6 +235,13 @@ export class Daemon {
   private currentFrameId: number | undefined;
   private lastFrames: StackFrame[] = [];
   private lastStop: StoppedEvent | undefined;
+  /** The debuggee's OS process id, from the DAP `process` event
+   *  (systemProcessId). Used by `status` and as the attach target for the
+   *  profiling sidecar (`profile start`). Undefined until the adapter reports
+   *  it (some adapters never emit a `process` event). */
+  private processId: number | undefined;
+  /** The debuggee program path (for profile metadata). */
+  private programPath: string | undefined;
   /** Enabled exception-breakpoint filter IDs (e.g. debugpy "raised"/"uncaught").
    *  Applied at boot and re-applied live when changed. */
   private exceptionFilters: string[] = [];
@@ -375,6 +385,13 @@ export class Daemon {
       case "eval": return await this.handleEval(a);
       case "setvar": return await this.handleSetVar(a);
       case "output": return this.handleOutput(a);
+      // ---- profiling (bounded-window sampling via perf sidecar) ----
+      case "profile-start": return await this.handleProfileStart(socket, a);
+      case "profile-list": return this.handleProfileList();
+      case "profile-show": return this.handleProfileShow(a);
+      case "profile-report": return this.handleProfileReport(a);
+      case "profile-annotate": return this.handleProfileAnnotate(a);
+      case "profile-rm": return this.handleProfileRemove(a);
       default: throw new Error(`unknown method: ${m}`);
     }
   }
@@ -465,6 +482,9 @@ export class Daemon {
     c.on("output", (body: { output: string; category?: string }) => this.onOutput(body));
     c.on("breakpoint", (body: { reason: string; breakpoint: { id?: number; verified?: boolean; message?: string; line?: number; source?: { path?: string } } }) => {
       this.onBreakpointEvent(body);
+    });
+    c.on("process", (body: { systemProcessId?: number; name?: string }) => {
+      if (typeof body.systemProcessId === "number") this.processId = body.systemProcessId;
     });
     c.on("thread", () => { /* thread list refreshes lazily on demand */ });
   }
@@ -689,6 +709,7 @@ export class Daemon {
     },
   ): Promise<LaunchResult> {
     const sink: ProgressSink = (m) => this.progressTo(socket, m);
+    this.programPath = opts.programForBoot;
     await this.bootAdapter(socket, adapterId, languageId, opts.spawnCwd, opts.programForBoot, opts.port);
     try {
       this.mode = mode;
@@ -1160,6 +1181,78 @@ export class Daemon {
     };
   }
 
+  // ---- Profiling ----
+
+  /** `profile start [--rate N]`: sample the window from the current stop
+   *  to the next stop/termination. Spawns `perf record -p <pid>`, continues
+   *  the debuggee, SIGINTs perf at the exit bookend, saves a GUID-keyed
+   *  sample. Returns the metadata so the caller has the handle immediately. */
+  private async handleProfileStart(socket: Socket, a: unknown[]): Promise<profile.ProfileMeta> {
+    this.requireStopped();
+    const rate = Number(a[0] ?? 99) || 99;
+    if (rate < 1 || rate > 9999) throw new Error("rate must be 1..9999 Hz");
+    const pid = this.processId;
+    if (!pid) throw new Error("no debuggee PID known — the adapter didn't report a `process` event (needed to attach perf)");
+    // Capture the entry bookend frame (current top of stack).
+    const startFrame = this.lastFrames[0];
+    const startView = startFrame
+      ? { name: startFrame.name, file: startFrame.source?.path, line: startFrame.line, column: startFrame.column }
+      : undefined;
+    const tid = this.currentThreadId!;
+    // The continueFn: resume the debuggee, block until the next stop/terminate.
+    const continueFn = async () => {
+      const p = this.beginWait();
+      this.stopped = false;
+      await this.client!.continue(tid);
+      const outcome = await p;
+      if (outcome.kind === "terminated") {
+        return { kind: "terminated" as const };
+      }
+      const f = outcome.stack?.[0] ?? this.lastFrames[0];
+      return {
+        kind: "stopped" as const,
+        frame: f ? { name: f.name, file: f.source?.path, line: f.line, column: f.column } : undefined,
+      };
+    };
+    const m = await profile.captureSample(
+      pid, rate, continueFn,
+      { adapter: this.adapterId ?? "unknown", language: this.languageId, program: this.programPath, startFrame: startView },
+      (msg) => this.progressTo(socket, msg),
+    );
+    return m;
+  }
+
+  handleProfileList(): profile.ProfileSummary[] {
+    return profile.listSamples();
+  }
+
+  handleProfileShow(a: unknown[]): profile.ProfileMeta {
+    const id = String(a[0] ?? "");
+    if (!id) throw new Error("expected <sample-id> — run 'dbgx profile list'");
+    return profile.loadMeta(id);
+  }
+
+  async handleProfileReport(a: unknown[]): Promise<{ id: string; hotFunctions: profile.HotFunction[] }> {
+    const id = String(a[0] ?? "");
+    if (!id) throw new Error("expected <sample-id> — run 'dbgx profile list'");
+    const limit = Number(a[1] ?? 20) || 20;
+    return { id, hotFunctions: await profile.hotFunctions(id, limit) };
+  }
+
+  async handleProfileAnnotate(a: unknown[]): Promise<{ id: string; symbol: string; instructions: profile.AnnotatedInstruction[] }> {
+    const id = String(a[0] ?? "");
+    const symbol = String(a[1] ?? "");
+    if (!id || !symbol) throw new Error("expected <sample-id> <symbol> — e.g. 'dbgx profile annotate <id> main'");
+    const limit = Number(a[2] ?? 200) || 200;
+    return { id, symbol, instructions: await profile.annotateFunction(id, symbol, limit) };
+  }
+
+  handleProfileRemove(a: unknown[]): { id: string; removed: boolean } {
+    const id = String(a[0] ?? "");
+    if (!id) throw new Error("expected <sample-id> — run 'dbgx profile list'");
+    return { id, removed: profile.deleteSample(id) };
+  }
+
   // ---- Helpers ----
 
   /** Search the current frame's scopes for a named variable. Returns the
@@ -1605,6 +1698,7 @@ export class Daemon {
       thread: this.currentThreadId,
       frame: this.currentFrameId,
       stopReason: this.lastStop?.reason,
+      processId: this.processId,
       breakpointCount: this.countBreaks(),
       outputBytes: this.outputBuffer.length,
       caps: {
@@ -1652,6 +1746,8 @@ export class Daemon {
     this.currentFrameId = undefined;
     this.lastFrames = [];
     this.lastStop = undefined;
+    this.processId = undefined;
+    this.programPath = undefined;
     this.outputBuffer = "";
     this.stopWaiter = null;
     this.cleanupBunRuntime();

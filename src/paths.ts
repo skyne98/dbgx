@@ -16,6 +16,10 @@ export const RUNTIME_DIR = join(DBGX_DIR, "runtime");
 /** Directory holding per-workspace state (session dumps, output logs). */
 export const WORKSPACE_DIR = join(DBGX_DIR, "workspaces");
 
+/** Directory holding saved profiling samples (perf.data + metadata).
+ *  Global (not per-workspace) so a GUID from any session resolves here. */
+export const PROFILES_DIR = join(DBGX_DIR, "profiles");
+
 /** Path to the single daemon Unix socket (per-workspace variants derived). */
 export const SOCKET_PATH = join(RUNTIME_DIR, "daemon.sock");
 
@@ -26,7 +30,7 @@ export const PID_PATH = join(RUNTIME_DIR, "daemon.pid");
 export const LOG_PATH = join(RUNTIME_DIR, "daemon.log");
 
 export function ensureDirs(): void {
-  for (const dir of [DBGX_DIR, RUNTIME_DIR, WORKSPACE_DIR]) {
+  for (const dir of [DBGX_DIR, RUNTIME_DIR, WORKSPACE_DIR, PROFILES_DIR]) {
     mkdirSync(dir, { recursive: true });
   }
 }

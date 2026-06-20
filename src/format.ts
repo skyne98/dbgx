@@ -277,6 +277,7 @@ export function formatStatus(r: StatusResult, o: FormatOpts): string {
     c.dim(`  adapter: ${r.adapter ?? "none"}${r.language ? ` (${r.language})` : ""}${r.mode ? `  mode: ${r.mode}` : ""}`),
   ];
   if (r.thread != null) out.push(c.dim(`  thread: #${r.thread}` + (r.frame != null ? `  frame: #${r.frame}` : "") + (r.stopReason ? `  reason: ${r.stopReason}` : "")));
+  if (r.processId != null) out.push(c.dim(`  process: #${r.processId}`));
   out.push(c.dim(`  breakpoints: ${r.breakpointCount}  output: ${formatBytes(r.outputBytes)}`));
   if (r.adapter) {
     const caps = Object.entries(r.caps).filter(([, v]) => v).map(([k]) => k);
@@ -331,8 +332,105 @@ function normalizeLocals(r: LocalsResult) {
   return { scopes: r.scopes };
 }
 
+// ---- Profiling ----
+
+import type { ProfileMeta, ProfileSummary, HotFunction, AnnotatedInstruction } from "./daemon/profile.ts";
+
+export interface ProfileStartResult {
+  id: string;
+  createdAt: string;
+  pid: number;
+  adapter: string;
+  language?: string;
+  program?: string;
+  durationMs: number;
+  sampleCount: number;
+  dataSize: string;
+  rate: number;
+  endReason: string;
+  startFrame?: { name: string; file?: string; line: number; column: number };
+  stopFrame?: { name: string; file?: string; line: number; column: number };
+}
+
+export function formatProfileStart(r: ProfileStartResult, o: FormatOpts): string {
+  if (o.json) return JSON.stringify(r);
+  const out: string[] = [];
+  out.push(`${c.green("✓")} sample ${c.cyan(r.id)} saved`);
+  out.push(c.dim(`  ${r.sampleCount} samples over ${formatMs(r.durationMs)} (${r.dataSize}, ${r.rate}Hz, ${r.endReason})`));
+  if (r.startFrame) out.push(c.dim(`  window: ${frameLoc(r.startFrame)}  →  ${r.stopFrame ? frameLoc(r.stopFrame) : "(end)"}`));
+  out.push(c.dim(`  next: dbgx profile report ${r.id}   |   dbgx profile annotate ${r.id} <symbol>`));
+  return out.join("\n");
+}
+
+export function formatProfileList(r: ProfileSummary[], o: FormatOpts): string {
+  if (o.json) return JSON.stringify({ samples: r });
+  if (!r.length) return c.dim("(no profiling samples — run 'dbgx profile start' between two breakpoints)");
+  const out: string[] = [c.bold("samples")];
+  for (const s of r) {
+    out.push(`  ${c.cyan(s.id)}  ${c.dim(s.createdAt)}  ${formatMs(s.durationMs)}  ${s.sampleCount} samples  ${c.dim(s.endReason)}  ${s.adapter}`);
+  }
+  out.push(c.dim("\n  report: dbgx profile report <id>   |   annotate: dbgx profile annotate <id> <symbol>"));
+  return out.join("\n");
+}
+
+export function formatProfileShow(r: ProfileMeta, o: FormatOpts): string {
+  if (o.json) return JSON.stringify(r);
+  const out: string[] = [`${c.bold("sample")} ${c.cyan(r.id)}`];
+  out.push(c.dim(`  created: ${r.createdAt}`));
+  out.push(c.dim(`  adapter: ${r.adapter}${r.language ? ` (${r.language})` : ""}   pid: #${r.pid}${r.program ? `   program: ${r.program}` : ""}`));
+  out.push(c.dim(`  ${r.sampleCount} samples over ${formatMs(r.durationMs)} (${r.dataSize}, ${r.rate}Hz, ${r.endReason})`));
+  if (r.startFrame) out.push(c.dim(`  window start: ${frameLoc(r.startFrame)}`));
+  if (r.stopFrame) out.push(c.dim(`  window stop:  ${frameLoc(r.stopFrame)}`));
+  out.push(c.dim(`  perf.data: ${r.perfDataPath}`));
+  return out.join("\n");
+}
+
+export function formatProfileReport(r: { id: string; hotFunctions: HotFunction[] }, o: FormatOpts): string {
+  if (o.json) return JSON.stringify(r);
+  const out: string[] = [`${c.bold("hot functions")} ${c.dim(`sample ${r.id}`)}`];
+  if (!r.hotFunctions.length) { out.push(c.dim("  (no samples — window too short or perf failed)")); return out.join("\n"); }
+  for (const f of r.hotFunctions) {
+    const pct = `${f.overhead.toFixed(2)}%`.padStart(7);
+    const loc = f.file ? c.dim(`  ${rel(f.file, o.workspaceRoot)}:${f.line}`) : "";
+    out.push(`  ${c.yellow(pct)}  ${f.symbol}${loc}`);
+  }
+  out.push(c.dim(`\n  annotate: dbgx profile annotate ${r.id} <symbol>`));
+  return out.join("\n");
+}
+
+export function formatProfileAnnotate(r: { id: string; symbol: string; instructions: AnnotatedInstruction[] }, o: FormatOpts): string {
+  if (o.json) return JSON.stringify(r);
+  const out: string[] = [`${c.bold("annotate")} ${c.cyan(r.symbol)} ${c.dim(`sample ${r.id}`)}`];
+  if (!r.instructions.length) { out.push(c.dim("  (no instruction samples — try a different symbol, or check perf annotate)")); return out.join("\n"); }
+  let curSource: string | undefined;
+  for (const ins of r.instructions) {
+    if (ins.source && ins.source !== curSource) {
+      curSource = ins.source;
+      out.push(c.dim(`  ── ${ins.source} ──`));
+    }
+    const pct = ins.overhead > 0 ? c.yellow(ins.overhead.toFixed(2).padStart(6) + "%") : c.dim("     .");
+    out.push(`  ${c.dim(ins.address)}  ${pct}  ${ins.asm}`);
+  }
+  return out.join("\n");
+}
+
+export function formatProfileRm(r: { id: string; removed: boolean }, o: FormatOpts): string {
+  if (o.json) return JSON.stringify(r);
+  return r.removed ? c.green(`✓ sample ${r.id} removed`) : c.yellow(`(sample ${r.id} not found)`);
+}
+
+function frameLoc(f: { name: string; file?: string; line: number; column: number }): string {
+  return `${f.name} ${f.file ?? "<no source>"}:${f.line}:${f.column}`;
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n}B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
   return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }
+

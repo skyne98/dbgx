@@ -1,0 +1,22 @@
+# deps
+node_modules/
+
+# lockfile (bun.lock is the new text format; track it for reproducible installs)
+# (bun.lockb was the old binary format — ignore if present)
+bun.lockb
+
+# logs & runtime
+*.log
+.DS_Store
+
+# compiled example binaries (rebuilt on demand by the toolchain)
+examples/hello
+examples/struct
+examples/loop
+examples/stl
+examples/throw
+examples/heavy
+examples/fibgo
+examples/fib
+examples/rust/target/
+examples/go/__debug_bin*

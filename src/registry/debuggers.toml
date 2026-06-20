@@ -1,0 +1,393 @@
+# dbgx debug-adapter registry.
+#
+# Schema mirrors Helix's languages.toml, adapted for debug adapters:
+#   [debug-adapter.<id>]   -> command + args (+ optional config/install)
+#   [[language]]           -> name, file-types, roots, debug-adapters[]
+#
+# Commands/args are the canonical, stable stdio-DAP invocation for each
+# adapter (the same contracts VS Code, Helix, Neovim rely on). Curated to
+# the languages an AI agent actually debugs; extend freely.
+#
+# DAP is NOT JSON-RPC: its envelope uses command/arguments/type and
+# event/body. dbgx hand-rolls framing in src/dap/client.ts (vscode-jsonrpc
+# speaks JSON-RPC proper, so it doesn't apply here).
+
+[debug-adapter.debugpy]
+command = "debugpy-adapter"
+install = "pip install debugpy"
+
+[debug-adapter.dlv]
+# Delve's DAP server is headless TCP (prints "DAP server listening at HOST:PORT").
+# --check-go-version=false suppresses the min-Go-version gate so dlv can launch
+# programs built with older Go toolchains (still requires a compatible runtime).
+command = "dlv"
+args = ["dap", "--check-go-version=false"]
+transport = "tcp"
+install = "go install github.com/go-delve/delve/cmd/dlv@latest  # or: https://github.com/go-delve/delve/releases"
+# Delve launch needs a `mode`. Merged into launch args by the session.
+config = { mode = "debug" }
+
+[debug-adapter.lldb-dap]
+command = "lldb-dap"
+install = "brew install llvm   # or: apt install lldb (LLDB 18+)"
+
+[debug-adapter.codelldb]
+command = "codelldb"
+install = "https://github.com/vadimcn/codelldb/releases"
+
+[debug-adapter.gdb-dap]
+# GDB 14+ ships a built-in DAP interpreter (no separate binary).
+command = "gdb"
+args = ["--interpreter=dap"]
+install = "apt install gdb   # GDB 14+ required for built-in DAP"
+
+[debug-adapter.js-debug-adapter]
+# vscode-js-debug's standalone server is TCP-based: it prints
+# "Debug server listening at HOST:PORT" then speaks DAP over the socket.
+# Node launch needs `type` + `runtimeExecutable`; merged by buildLaunchArgs.
+command = "node"
+args = ["/opt/js-debug-dap/js-debug/src/dapDebugServer.js", "0", "127.0.0.1"]
+transport = "tcp"
+install = "https://github.com/microsoft/vscode-js-debug/releases (js-debug-dap-*.tar.gz)"
+
+[debug-adapter.netcoredbg]
+# .NET / C# / F# debugger. Needs `dotnet` runtime on PATH to launch programs.
+command = "netcoredbg"
+args = ["--interpreter=vscode"]
+install = "https://github.com/Samsung/netcoredbg   # or: nix shell nixpkgs#netcoredbg nixpkgs#dotnet-sdk"
+
+[debug-adapter.rdbg]
+# Ruby's official debugger (ruby/debug gem). `--open` starts a TCP DAP server
+# (no frontend = DAP protocol). The program is passed on the command line
+# after `--`. dbgx allocates a free port ({port}) and substitutes the program
+# ({program}). `--stop-at-load` pauses at the first line (like stopOnEntry).
+command = "rdbg"
+args = ["--open", "--stop-at-load", "--host", "127.0.0.1", "--port", "{port}", "--", "{program}"]
+transport = "tcp-allocate"
+install = "gem install debug   # Ruby's debug gem; or: nix shell nixpkgs#ruby nixpkgs#rubyPackages.debug"
+
+[debug-adapter.java-debug]
+# Java/Kotlin debugger. Needs `javac`/JDK on PATH to compile+launch.
+command = "java-debug"
+install = "https://github.com/microsoft/java-debug   # or: nix shell nixpkgs#jdk21"
+
+# --- new adapters ---
+
+[debug-adapter.dart]
+# Dart's DAP is built into the SDK: `dart debug_adapter` speaks stdio DAP.
+# Launch `program` is a .dart file (or bin/main.dart); `cwd` is the project root.
+command = "dart"
+args = ["debug_adapter"]
+install = "https://dart.dev/get-dart   # or: nix shell nixpkgs#dart"
+
+[debug-adapter.flutter]
+# Flutter's DAP (built into the flutter CLI): `flutter debug_adapter` stdio.
+# `program` is the .dart entry point; `cwd` must be the Flutter project root.
+command = "flutter"
+args = ["debug_adapter"]
+install = "https://docs.flutter.dev/get-started/install   # or: nix shell nixpkgs#flutter"
+
+[debug-adapter.elixir-ls]
+# ElixirLS bundles LSP + DAP. The nix package ships `elixir-debug-adapter`,
+# a stdio DAP server. ElixirLS starts the debuggee on `launch` but the
+# program doesn't run past `configurationDone` — breakpoints set after
+# `initialized` (standard DAP flow) are verified because modules are loaded
+# by then (via `requireFiles` in the launch config).
+command = "elixir-debug-adapter"
+install = "https://github.com/elixir-lsp/elixir-ls   # or: nix shell nixpkgs#elixir-ls"
+
+[debug-adapter.php-debug]
+# vscode-php-debug (Xdebug) standalone: node runs the extension's DAP entry.
+# The nix package points at out/phpDebug.js. Launch runs `php <program>` and
+# talks to Xdebug over a local port (the adapter manages the port itself).
+command = "node"
+# {phpDebugPath} is resolved at spawn time to the installed adapter's
+# out/phpDebug.js (the daemon finds it via `which php-debug` or known paths).
+args = ["{phpDebugPath}"]
+install = "https://github.com/xdebug/vscode-php-debug   # or: nix shell nixpkgs#vscode-extensions.xdebug.php-debug nixpkgs#php nixpkgs#phpExtensions.xdebug"
+
+[debug-adapter.haskell-debugger]
+# well-typed/haskell-debugger: a step-through debugger for GHC. stdio DAP.
+# Launch `program` is a compiled Haskell binary; `cwd`/`args` as usual.
+command = "haskell-debugger"
+install = "nix shell nixpkgs#haskellPackages.haskell-debugger   # https://well-typed.github.io/haskell-debugger/"
+
+[debug-adapter.kotlin-debug-adapter]
+# fwcd/kotlin-debug-adapter: a standalone JAR speaking stdio DAP over JVM.
+# Launch `program` is the project root; `mainClass` + classpath are required.
+command = "java"
+args = ["-jar", "{kotlinAdapterJar}"]
+install = "https://github.com/fwcd/kotlin-debug-adapter/releases   # download the JAR; needs nix shell nixpkgs#jdk21"
+
+[debug-adapter.ocaml-earlybird]
+# hackwaly/ocamlearlybird: stdio DAP for OCaml. `program` is a compiled binary.
+command = "earlybird"
+install = "opam install earlybird   # https://github.com/hackwaly/ocamlearlybird"
+
+[debug-adapter.probe-rs]
+# probe-rs DAP server for embedded Rust/C/C++ (ARM Cortex via SWD/JTAG).
+# TCP transport: takes a --port argument. dbgx allocates a free port and
+# substitutes {port}. Requires a physical debug probe + chip target config.
+command = "probe-rs"
+args = ["dap-server", "--port", "{port}", "--ip", "127.0.0.1"]
+transport = "tcp-allocate"
+install = "nix shell nixpkgs#probe-rs-tools   # https://probe.rs/"
+
+[debug-adapter.perl-debug]
+# Perl::LanguageServer bundles LSP + DAP. TCP transport: takes --port.
+# dbgx allocates a free port and substitutes {port}. `program` is a .pl file.
+command = "perl"
+args = ["-MPerl::LanguageServer", "-e", "Perl::LanguageServer::run", "--", "--port", "{port}"]
+transport = "tcp-allocate"
+install = "cpanm Perl::LanguageServer   # https://metacpan.org/pod/Perl::LanguageServer"
+
+[debug-adapter.r-debugger]
+# vscDebugger R package: stdio DAP. Launch `program` is an .R file; the
+# adapter spawns R under the hood. Needs vscDebugger installed from r-universe.
+command = "R"
+args = ["--slave", "-e", "vscDebugger:::.dapListen()"]
+install = "nix shell nixpkgs#R   # then in R: install.packages('vscDebugger', repos='https://manuelhentschel.r-universe.dev')"
+
+[debug-adapter.lua-debug]
+# actboy168/lua-debug: DAP for Lua. Spawns a process that needs the
+# compiled adapter (.dll/.so) on the LUA_PATH. Launch `program` is a .lua file.
+command = "lua-debug"
+install = "https://github.com/actboy168/lua-debug   # build via luamake; prebuiled releases available"
+
+[debug-adapter.godot-dap]
+# Godot's built-in DAP server. Attach-only: the Godot editor starts a DAP
+# server when launched with `--editor --dap-port`. dbgx does NOT spawn the
+# editor — the user starts it themselves (so the game can render on a real
+# display), then attaches:
+#   godot --editor --dap-port 6006 --path /my/project   # terminal 1
+#   dbgx attach gdscript --port 6006                     # terminal 2
+# `defaultPort = 6006` lets `dbgx attach gdscript` work without --port.
+command = "godot"
+transport = "tcp-attach"
+defaultPort = 6006
+install = "nix shell nixpkgs#godot_4   # https://docs.godotengine.org/en/stable/tutorials/scripting/debug/overview_of_debugging_tools.html"
+
+[debug-adapter.powershell]
+# PowerShell EditorServices: pwsh runs Start-EditorServices.ps1, which opens
+# a DAP server and writes the port to a session-details JSON. TCP transport;
+# dbgx reads the port from the session JSON. `program` is a .ps1 script.
+command = "pwsh"
+args = ["-NoLogo", "-NoProfile", "-Command", "{psesStartScript}"]
+transport = "tcp-allocate"
+install = "nix shell nixpkgs#powershell nixpkgs#powershell-editor-services   # https://github.com/PowerShell/PowerShellEditorServices"
+
+[debug-adapter.scala-debug-adapter]
+# scala-debug-adapter runs INSIDE an SBT session (an sbt plugin), not as a
+# standalone spawn. dbgx connects to its DAP port via an SBT-launched server.
+# Registered for discoverability; launching requires `sbt` + the plugin in build.sbt.
+command = "scala-debug-adapter"
+transport = "tcp-allocate"
+install = "https://github.com/scalacenter/scala-debug-adapter   # add sbt-debug-adapter plugin; nix shell nixpkgs#sbt"
+
+# --- languages ---
+
+[[language]]
+name = "python"
+file-types = ["py", "pyi", "pyw"]
+roots = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"]
+debug-adapters = ["debugpy"]
+
+[[language]]
+name = "go"
+file-types = ["go"]
+roots = ["go.work", "go.mod"]
+debug-adapters = ["dlv"]
+
+[[language]]
+name = "c"
+file-types = ["c", "h"]
+roots = ["compile_commands.json", "Makefile", "CMakeLists.txt"]
+debug-adapters = ["lldb-dap", "codelldb", "gdb-dap"]
+
+[[language]]
+name = "cpp"
+file-types = ["cc", "cpp", "cxx", "hh", "hpp", "hxx", "h", "ipp", "tpp"]
+roots = ["compile_commands.json", "Makefile", "CMakeLists.txt"]
+debug-adapters = ["lldb-dap", "codelldb", "gdb-dap"]
+
+[[language]]
+name = "cuda"
+file-types = ["cu", "cuh"]
+roots = ["CMakeLists.txt"]
+debug-adapters = ["lldb-dap", "codelldb"]
+
+[[language]]
+name = "objective-c"
+file-types = ["m", "mm", "h"]
+roots = ["Podfile", "compile_commands.json"]
+debug-adapters = ["lldb-dap", "codelldb"]
+
+[[language]]
+name = "rust"
+file-types = ["rs"]
+roots = ["Cargo.toml", "Cargo.lock"]
+debug-adapters = ["lldb-dap", "codelldb"]
+
+[[language]]
+name = "zig"
+file-types = ["zig"]
+roots = ["build.zig"]
+debug-adapters = ["lldb-dap", "codelldb"]
+
+[[language]]
+name = "swift"
+file-types = ["swift"]
+roots = ["Package.swift", "*.xcodeproj"]
+debug-adapters = ["lldb-dap", "codelldb"]
+
+[[language]]
+name = "javascript"
+file-types = ["js", "mjs", "cjs"]
+roots = ["package.json", "jsconfig.json"]
+debug-adapters = ["js-debug-adapter"]
+
+[[language]]
+name = "typescript"
+file-types = ["ts", "mts", "cts"]
+roots = ["package.json", "tsconfig.json"]
+debug-adapters = ["js-debug-adapter"]
+
+# Bun: a standalone JS/TS runtime. Maps to js-debug-adapter, but the daemon
+# sets `runtimeExecutable` to `bun` (which speaks the V8 inspector protocol).
+# Bun runs `.ts` files natively — no tsc/compile step required.
+[[language]]
+name = "bun"
+file-types = ["js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx"]
+roots = ["package.json", "bunfig.toml", "tsconfig.json"]
+debug-adapters = ["js-debug-adapter"]
+
+# Deno: a standalone JS/TS runtime with native TypeScript. Maps to
+# js-debug-adapter; the daemon sets `runtimeExecutable` to `deno` (V8 inspector).
+# Needs `--inspect-brk` passed via runtimeArgs; the daemon handles this.
+[[language]]
+name = "deno"
+file-types = ["js", "mjs", "ts", "jsx", "tsx"]
+roots = ["deno.json", "deno.jsonc", "import_map.json"]
+debug-adapters = ["js-debug-adapter"]
+
+[[language]]
+name = "jsx"
+file-types = ["jsx"]
+roots = ["package.json"]
+debug-adapters = ["js-debug-adapter"]
+
+[[language]]
+name = "tsx"
+file-types = ["tsx"]
+roots = ["package.json", "tsconfig.json"]
+debug-adapters = ["js-debug-adapter"]
+
+[[language]]
+name = "c-sharp"
+file-types = ["cs", "csx"]
+roots = ["*.sln", "*.csproj"]
+debug-adapters = ["netcoredbg"]
+
+[[language]]
+name = "f-sharp"
+file-types = ["fs", "fsx", "fsi"]
+roots = ["*.fsproj", "*.sln"]
+debug-adapters = ["netcoredbg"]
+
+[[language]]
+name = "ruby"
+file-types = ["rb"]
+roots = ["Gemfile", "Rakefile", "*.gemspec"]
+debug-adapters = ["rdbg"]
+
+[[language]]
+name = "java"
+file-types = ["java"]
+roots = ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"]
+debug-adapters = ["java-debug"]
+
+[[language]]
+name = "kotlin"
+file-types = ["kt", "kts"]
+roots = ["build.gradle", "build.gradle.kts", "settings.gradle"]
+debug-adapters = ["java-debug", "kotlin-debug-adapter"]
+
+# --- new languages ---
+
+[[language]]
+name = "dart"
+file-types = ["dart"]
+roots = ["pubspec.yaml"]
+debug-adapters = ["dart"]
+
+[[language]]
+name = "elixir"
+file-types = ["ex", "exs"]
+roots = ["mix.exs"]
+debug-adapters = ["elixir-ls"]
+
+[[language]]
+name = "php"
+file-types = ["php", "phtml"]
+roots = ["composer.json", "index.php"]
+debug-adapters = ["php-debug"]
+
+[[language]]
+name = "haskell"
+file-types = ["hs", "lhs"]
+roots = ["package.yaml", "*.cabal", "stack.yaml", "cabal.project"]
+debug-adapters = ["haskell-debugger"]
+
+[[language]]
+name = "ocaml"
+file-types = ["ml", "mli"]
+roots = ["dune-project", "*.opam"]
+debug-adapters = ["ocaml-earlybird"]
+
+[[language]]
+name = "perl"
+file-types = ["pl", "pm", "t"]
+roots = ["cpanfile", "Makefile.PL", "dist.ini"]
+debug-adapters = ["perl-debug"]
+
+[[language]]
+name = "r"
+file-types = ["R", "r", "Rmd"]
+roots = ["DESCRIPTION", "*.Rproj"]
+debug-adapters = ["r-debugger"]
+
+[[language]]
+name = "lua"
+file-types = ["lua"]
+roots = [".luarc.json", "lua"]
+debug-adapters = ["lua-debug"]
+
+[[language]]
+name = "gdscript"
+file-types = ["gd"]
+roots = ["project.godot"]
+debug-adapters = ["godot-dap"]
+
+[[language]]
+name = "powershell"
+file-types = ["ps1", "psm1", "psd1"]
+roots = ["*.psd1", "*.sln"]
+debug-adapters = ["powershell"]
+
+[[language]]
+name = "scala"
+file-types = ["scala", "sbt"]
+roots = ["build.sbt", "build.sc", "project"]
+debug-adapters = ["scala-debug-adapter"]
+
+[[language]]
+name = "erlang"
+file-types = ["erl", "hrl"]
+roots = ["rebar.config", "erlang.mk"]
+debug-adapters = []  # erlang-ls archived; whatsapp/edb (erlang-language-platform) is the successor
+
+[[language]]
+name = "nim"
+file-types = ["nim", "nims"]
+roots = ["*.nimble", "nim.cfg"]
+debug-adapters = ["lldb-dap", "gdb-dap"]  # Nim compiles to C; debug native binaries

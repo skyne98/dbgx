@@ -1,0 +1,51 @@
+{
+  "name": "dbgx",
+  "version": "0.1.0",
+  "description": "DAP-powered debug assistant CLI for AI agents. Wraps and unifies many debug adapters (debugpy, dlv, lldb-dap, …) behind one terse, snippet-rich interface.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "skyne98",
+  "homepage": "https://github.com/skyne98/dbgx",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skyne98/dbgx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/skyne98/dbgx/issues"
+  },
+  "bin": {
+    "dbgx": "./bin/dbgx.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "start": "bun run bin/dbgx.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "dap",
+    "debug-adapter-protocol",
+    "debugger",
+    "cli",
+    "agent",
+    "breakpoints",
+    "stack-trace"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "smol-toml": "^1.6.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^6.0.3"
+  }
+}
